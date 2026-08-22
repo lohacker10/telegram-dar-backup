@@ -1,0 +1,12 @@
+[Unit]
+Description=Esegue il backup Telegram-DAR ogni mese
+
+[Timer]
+# Primo giorno del mese alle 03:15, orario locale del NAS.
+OnCalendar=*-*-01 03:15:00
+Persistent=true
+RandomizedDelaySec=20m
+Unit=telegram-dar-backup.service
+
+[Install]
+WantedBy=timers.target

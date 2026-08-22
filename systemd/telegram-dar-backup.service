@@ -1,0 +1,18 @@
+[Unit]
+Description=Backup DAR cifrato su Telegram
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/opt/telegram-dar-backup/venv/bin/python /opt/telegram-dar-backup/backup.py --config /etc/telegram-dar-backup/config.env
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+UMask=0077
+
+# Evita due run contemporanei anche se il timer venisse invocato più volte.
+# backup.py applica inoltre un flock interno.
+TimeoutStartSec=infinity
