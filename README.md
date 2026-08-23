@@ -225,11 +225,13 @@ These values are used by Telethon to authenticate the Telegram client.
 
 # ⚙️ Configuration
 
-Edit:
+Edit the installed configuration file:
 
 ```bash
 sudo nano /etc/telegram-dar-backup/config.env
 ```
+
+A complete documented example is available in `config.env.example`. Most installations only need to change the Telegram credentials, channel ID and source path; the remaining defaults can usually be kept as-is.
 
 Example:
 
@@ -252,7 +254,37 @@ KEEP_ONLY_LATEST_DIFF=true
 DAR_PASSPHRASE_FILE=/etc/telegram-dar-backup/dar.pass
 ```
 
-Protect the configuration:
+## 🧭 Configuration quick reference
+
+| Variable | Required? | What to do |
+| --- | --- | --- |
+| `TELEGRAM_API_ID` | Yes | Replace with the `api_id` obtained from `my.telegram.org`. |
+| `TELEGRAM_API_HASH` | Yes | Replace with the `api_hash` obtained from `my.telegram.org`. |
+| `TELEGRAM_CHANNEL_ID` | Yes, after first login | Run `telegram_login.py`, find the private backup channel in the printed list, then copy its numeric ID here **including the leading `-100`**. |
+| `TELEGRAM_SESSION_FILE` | No | Usually leave unchanged. This is where Telethon stores the authenticated session. |
+| `SOURCE` | Yes | Set this to the directory or mounted filesystem that must be backed up. |
+| `SOURCE_LABEL` | No | Friendly name written to backup metadata. It does not affect which files are backed up. |
+| `REQUIRE_SOURCE_MOUNT` | Usually | Use `true` when `SOURCE` is itself a mounted disk/filesystem; use `false` when `SOURCE` is a normal directory or subdirectory. |
+| `WORK_DIR` | No | Usually leave unchanged. It stores runtime state, temporary files and the local FULL catalogue cache. |
+| `SLICE_SIZE` | No | Usually leave `1900M`, which stays below Telegram's standard 2 GB file limit. |
+| `COMPRESSION` | No | Usually leave `zstd:6`. Lower values such as `zstd:3` use less CPU. |
+| `FULL_EVERY_MONTHS` | No | Number of months before a new FULL generation is created. Default: `6`. |
+| `KEEP_ONLY_LATEST_DIFF` | No | `true` keeps only the latest DIFF for the current FULL; `false` retains older monthly DIFF restore points. |
+| `DAR_PASSPHRASE_FILE` | Recommended | Path to the file containing the DAR encryption password. The installer creates it automatically by default. |
+
+## ✅ Recommended configuration order
+
+For a first installation, configure the project in this order:
+
+1. Set `TELEGRAM_API_ID` and `TELEGRAM_API_HASH`.
+2. Set `SOURCE` and decide whether `REQUIRE_SOURCE_MOUNT` should be `true` or `false`.
+3. Leave `TELEGRAM_CHANNEL_ID` with its temporary/example value for the moment.
+4. Run `telegram_login.py` as described in the **First Telegram login** section below.
+5. Copy the ID printed next to the desired private channel into `TELEGRAM_CHANNEL_ID`.
+6. Check the generated DAR password and store a secure copy of it somewhere outside the NAS.
+7. Run a manual FULL backup before enabling the systemd timer.
+
+Protect the configuration file:
 
 ```bash
 sudo chown root:root /etc/telegram-dar-backup/config.env
@@ -263,31 +295,28 @@ sudo chmod 600 /etc/telegram-dar-backup/config.env
 
 ## 🔒 Source mount protection
 
-If the source is a mounted disk such as:
+`REQUIRE_SOURCE_MOUNT` is a safety feature designed to avoid silently backing up the wrong directory when a disk is missing.
 
-```text
-/mnt/data
-```
-
-use:
+If `SOURCE` is the mount point of the disk/filesystem itself, for example:
 
 ```dotenv
+SOURCE=/mnt/data
 REQUIRE_SOURCE_MOUNT=true
 ```
 
-The backup will refuse to start if the path exists but is not an actual mount point. This helps prevent accidentally backing up an empty mount directory when the source disk is missing.
+then the backup refuses to start unless `/mnt/data` is actually mounted. This prevents a failed disk mount from turning `/mnt/data` into an ordinary empty directory that would otherwise produce an incorrect backup.
 
-If `SOURCE` intentionally points to a subdirectory, for example:
-
-```text
-/mnt/storage/documents
-```
-
-use:
+If `SOURCE` intentionally points to a normal directory or a subdirectory inside another filesystem, for example:
 
 ```dotenv
+SOURCE=/mnt/storage/documents
 REQUIRE_SOURCE_MOUNT=false
 ```
+
+then the mount-point check is disabled.
+
+> [!TIP]
+> If you are backing up an entire HDD, RAID volume or dedicated NAS data filesystem, `REQUIRE_SOURCE_MOUNT=true` is normally the safer choice.
 
 ---
 
@@ -988,14 +1017,22 @@ because it downloads the data again from Telegram, recalculates SHA-512, decrypt
 
 # 💡 Recommended backup strategy
 
-A sensible setup is:
+For important data, consider using this project as part of a broader **3-2-1 backup strategy**:
+
+- **3 copies** of the data in total;
+- stored on at least **2 different types of storage or systems**;
+- with at least **1 copy kept off-site**.
+
+A typical layout could be:
 
 ```text
 Primary NAS data
       +
 local/offline backup
       +
-encrypted Telegram off-site backup
+encrypted off-site backup
 ```
 
-This project is intended to provide the **off-site encrypted copy** in that strategy.
+Telegram DAR Backup can provide the **encrypted off-site copy** in such a strategy.
+
+It should not replace the other copies: the goal of the 3-2-1 approach is to avoid depending on a single disk, machine, location, or storage provider.
