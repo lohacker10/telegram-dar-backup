@@ -24,6 +24,7 @@ MANIFEST_TAG = "TDB_MANIFEST_V1"
 SLICE_TAG = "TDB_SLICE_V1"
 CATALOG_TAG = "TDB_CATALOG_V1"
 FORMAT_VERSION = "telegram-dar-backup/v1"
+_NAMESPACE_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 
 def load_config(path: str | Path) -> dict[str, str]:
@@ -56,6 +57,20 @@ def cfg_bool(cfg: dict[str, str], key: str, default: bool = False) -> bool:
     if v is None:
         return default
     return v.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def get_namespace(cfg: dict[str, str]) -> str:
+    """Return the logical Telegram backup namespace.
+
+    Older manifests did not carry a namespace. They are intentionally treated as
+    belonging to ``default`` so existing installations remain compatible.
+    """
+    value = cfg.get("TDB_NAMESPACE", "default").strip() or "default"
+    if not _NAMESPACE_RE.fullmatch(value):
+        raise RuntimeError(
+            "TDB_NAMESPACE non valido: usa 1..64 caratteri tra lettere, numeri, '.', '_' e '-'"
+        )
+    return value
 
 
 def get_work_dir(cfg: dict[str, str]) -> Path:
@@ -205,6 +220,7 @@ class RemoteManifestSummary:
     kind: str
     base_full_id: str
     created_utc: str
+    namespace: str = "default"
 
 
 async def make_client(cfg: dict[str, str]):
@@ -246,7 +262,18 @@ async def resolve_channel(client, cfg: dict[str, str]):
         )
 
 
-async def discover_manifest_summaries(client, channel, limit: int = 100) -> list[RemoteManifestSummary]:
+async def discover_manifest_summaries(
+    client,
+    channel,
+    limit: int = 100,
+    namespace: str | None = "default",
+) -> list[RemoteManifestSummary]:
+    """Discover COMPLETE manifests, optionally restricted to one namespace.
+
+    Captions created before namespace support are treated as ``default``.
+    ``namespace=None`` is reserved for tools that intentionally need to see all
+    namespaces; normal backup/restore callers should always pass their namespace.
+    """
     found: list[RemoteManifestSummary] = []
     seen: set[int] = set()
 
@@ -257,6 +284,9 @@ async def discover_manifest_summaries(client, channel, limit: int = 100) -> list
             fields = parse_caption(getattr(msg, "message", None), MANIFEST_TAG)
             if not fields:
                 continue
+            msg_namespace = fields.get("ns", "default")
+            if namespace is not None and msg_namespace != namespace:
+                continue
             try:
                 found.append(RemoteManifestSummary(
                     message_id=int(msg.id),
@@ -264,20 +294,21 @@ async def discover_manifest_summaries(client, channel, limit: int = 100) -> list
                     kind=fields["kind"].upper(),
                     base_full_id=fields.get("base", fields["backup"]),
                     created_utc=fields["created"],
+                    namespace=msg_namespace,
                 ))
                 seen.add(int(msg.id))
             except KeyError:
                 continue
 
-    # Prima usa la ricerca server-side. Se il backend non indicizza il tag come atteso,
-    # ripiega sugli ultimi messaggi: con la rotazione normale il canale contiene circa
-    # un FULL + un DIFF, quindi 10k messaggi sono ampiamente sufficienti anche con molte slice.
+    # Telegram's server-side search is useful for older manifests but indexing
+    # is not guaranteed to be immediate. Always merge it with a direct scan of
+    # recent channel messages so a manifest uploaded moments ago is visible to
+    # backup rotation, --list, restore and the self-test without arbitrary sleeps.
     try:
         await consume(client.iter_messages(channel, search=MANIFEST_TAG, limit=limit))
     except Exception:
         pass
-    if not found:
-        await consume(client.iter_messages(channel, limit=10000))
+    await consume(client.iter_messages(channel, limit=10000))
 
     found.sort(key=lambda x: parse_iso(x.created_utc), reverse=True)
     return found
@@ -293,7 +324,12 @@ async def download_manifest(client, channel, summary: RemoteManifestSummary, des
     if not result:
         raise RuntimeError(f"Download manifest fallito: {summary.backup_id}")
     data = json.loads(target.read_text(encoding="utf-8"))
-    if data.get("format") != FORMAT_VERSION or data.get("backup_id") != summary.backup_id:
+    data_namespace = str(data.get("namespace", "default"))
+    if (
+        data.get("format") != FORMAT_VERSION
+        or data.get("backup_id") != summary.backup_id
+        or data_namespace != summary.namespace
+    ):
         raise RuntimeError(f"Manifest non valido o non corrispondente: {summary.backup_id}")
     return data
 

@@ -22,6 +22,7 @@ from tdb_common import (
     delete_message_ids,
     discover_manifest_summaries,
     download_manifest,
+    get_namespace,
     get_work_dir,
     load_config,
     make_client,
@@ -90,6 +91,7 @@ async def ensure_full_catalog(cfg, client, channel, full_summary, full_manifest,
 
 async def run_backup(args) -> None:
     cfg = load_config(args.config)
+    namespace = get_namespace(cfg)
     source = validate_local(cfg)
     work = get_work_dir(cfg)
     work.mkdir(parents=True, exist_ok=True)
@@ -110,7 +112,7 @@ async def run_backup(args) -> None:
     job_dir: Path | None = None
     try:
         channel = await resolve_channel(client, cfg)
-        summaries = await discover_manifest_summaries(client, channel)
+        summaries = await discover_manifest_summaries(client, channel, namespace=namespace)
         fulls = [s for s in summaries if s.kind == "FULL"]
         latest_full = fulls[0] if fulls else None
 
@@ -153,6 +155,7 @@ async def run_backup(args) -> None:
             "--config", shlex.quote(str(Path(args.config).resolve())),
             "--job-dir", shlex.quote(str(job_dir)),
             "--backup-id", shlex.quote(backup_id),
+            "--namespace", shlex.quote(namespace),
             "--kind", kind,
             "--slice-path", '"%p/%b.%N.%e"',
             "--slice-number", '"%n"',
@@ -164,15 +167,24 @@ async def run_backup(args) -> None:
             "-R", str(source),
             "-s", cfg.get("SLICE_SIZE", "1900M"),
             "-9", ("4,1" if kind == "DIFF" else "4"),
-            "-z", cfg.get("COMPRESSION", "zstd:6"),
+            f"--compression={cfg.get('COMPRESSION', 'zstd:6')}",
             "-B", str(dcf),
             "-E", hook,
         ]
         if kind == "DIFF":
             cmd += ["-A", str(ref_catalog_base)]
 
-        print(f"Backup {kind} {backup_id} di {source}")
-        run_checked(cmd)
+        print(f"Backup {kind} {backup_id} di {source} [namespace={namespace}]")
+
+        # DAR invokes slice_upload.py as a child process. That hook opens the
+        # same Telethon SQLite session, so the parent must release it while DAR
+        # is running to avoid sqlite3.OperationalError: database is locked.
+        await client.disconnect()
+        try:
+            run_checked(cmd)
+        finally:
+            if not client.is_connected():
+                await client.connect()
 
         slices = read_jsonl(journal)
         if not slices:
@@ -200,7 +212,7 @@ async def run_backup(args) -> None:
             if not catalog_file.exists():
                 raise RuntimeError("DAR non ha creato il catalogo isolato atteso")
             cat_hash = sha512_file(catalog_file)
-            cat_caption = f"{CATALOG_TAG} backup={backup_id} created={created}"
+            cat_caption = f"{CATALOG_TAG} backup={backup_id} ns={namespace} created={created}"
             cat_msg = await upload_document(client, channel, catalog_file, cat_caption)
             current_remote_ids.append(int(cat_msg.id))
             catalog_info = {
@@ -218,6 +230,7 @@ async def run_backup(args) -> None:
 
         manifest = {
             "format": FORMAT_VERSION,
+            "namespace": namespace,
             "backup_id": backup_id,
             "kind": kind,
             "base_full_id": base_full_id,
@@ -232,20 +245,24 @@ async def run_backup(args) -> None:
         }
         manifest_path = job_dir / f"manifest-{backup_id}.json"
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        caption = f"{MANIFEST_TAG} backup={backup_id} kind={kind} base={base_full_id} created={created}"
+        caption = (
+            f"{MANIFEST_TAG} backup={backup_id} kind={kind} base={base_full_id} "
+            f"ns={namespace} created={created}"
+        )
         manifest_msg = await upload_document(client, channel, manifest_path, caption)
         current_remote_ids.append(int(manifest_msg.id))
         backup_committed = True
 
-        # Solo dopo il manifest COMPLETE eliminiamo i backup precedenti.
-        fresh_summaries = await discover_manifest_summaries(client, channel)
+        # Solo dopo il manifest COMPLETE eliminiamo i backup precedenti dello
+        # STESSO namespace. I namespace separano test e backup reali nello stesso canale.
+        fresh_summaries = await discover_manifest_summaries(client, channel, namespace=namespace)
         temp_del = work / "tmp-delete"
         if kind == "FULL":
             for s in fresh_summaries:
                 if s.backup_id != backup_id:
                     print(f"Rotazione: elimino backup precedente {s.backup_id}")
                     await delete_backup_from_manifest(client, channel, s, temp_del)
-            # Rimuove cataloghi locali di generazioni precedenti.
+            # Rimuove cataloghi locali di generazioni precedenti in questo WORK_DIR.
             for p in (work / "catalogs").glob("*.dar"):
                 if not p.name.startswith(backup_id + "."):
                     p.unlink(missing_ok=True)

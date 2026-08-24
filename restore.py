@@ -5,15 +5,18 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import shlex
 import shutil
 import sys
 from pathlib import Path
 
 from tdb_common import (
+    dar_version,
     discover_manifest_summaries,
     download_manifest,
     ensure_empty_or_create,
+    get_namespace,
     get_work_dir,
     load_config,
     make_client,
@@ -39,6 +42,24 @@ def choose_summary(summaries):
         print("Scelta non valida.")
 
 
+def dar_direct_compat_args() -> list[str]:
+    """Use deterministic single-thread DAR crypto/decompression when available.
+
+    The Telegram restore path is network-bound, so DAR-internal read parallelism
+    provides little value here. Explicit -G 1,1 also avoids known 2.7.x
+    multi-thread decipher/decompression corner cases while direct-access mode
+    avoids the sequential-read bugs fixed upstream after Debian's 2.7.17.
+    """
+    version = dar_version()
+    match = re.search(r"\b(\d+)\.(\d+)(?:\.(\d+))?\b", version)
+    if not match:
+        return []
+    parsed = tuple(int(x or 0) for x in match.groups())
+    if parsed >= (2, 7, 0):
+        return ["-G", "1,1"]
+    return []
+
+
 def run_archive_restore(cfg_path: Path, manifest: dict, dest: Path, work: Path, passphrase: str, verify_only: bool) -> None:
     work.mkdir(parents=True, exist_ok=True)
     map_file = work / "map.json"
@@ -57,12 +78,22 @@ def run_archive_restore(cfg_path: Path, manifest: dict, dest: Path, work: Path, 
     ])
 
     archive_base = work / "archive"
+    compat = dar_direct_compat_args()
+    if compat:
+        print("DAR direct-access: modalità conservativa single-thread (-G 1,1)", flush=True)
+
+    # Deliberately use DAR's normal direct-access mode. The -E hook supplies
+    # whichever slice DAR asks for, like removable media. This avoids the
+    # encrypted+sliced --sequential-read bugs present in Debian DAR 2.7.17.
     if verify_only:
-        cmd = ["dar", "-Q", "-t", str(archive_base), "--sequential-read", "-9", "4", "-B", str(secret), "-E", hook]
+        cmd = [
+            "dar", "-Q", "-t", str(archive_base), "-9", "4",
+            *compat, "-B", str(secret), "-E", hook,
+        ]
     else:
         cmd = [
-            "dar", "-Q", "-x", str(archive_base), "--sequential-read", "-9", "4",
-            "-R", str(dest), "-wa", "-B", str(secret), "-E", hook,
+            "dar", "-Q", "-x", str(archive_base), "-9", "4",
+            *compat, "-R", str(dest), "-wa", "-B", str(secret), "-E", hook,
         ]
     try:
         run_checked(cmd)
@@ -73,6 +104,7 @@ def run_archive_restore(cfg_path: Path, manifest: dict, dest: Path, work: Path, 
 async def restore_async(args) -> None:
     cfg_path = Path(args.config).expanduser().resolve()
     cfg = load_config(cfg_path)
+    namespace = get_namespace(cfg)
     if not shutil.which("dar"):
         raise RuntimeError("Comando 'dar' non trovato. Installa: apt install dar")
     work = get_work_dir(cfg)
@@ -81,9 +113,9 @@ async def restore_async(args) -> None:
     client = await make_client(cfg)
     try:
         channel = await resolve_channel(client, cfg)
-        summaries = await discover_manifest_summaries(client, channel)
+        summaries = await discover_manifest_summaries(client, channel, namespace=namespace)
         if not summaries:
-            raise RuntimeError("Nessun manifest di backup trovato nel canale Telegram")
+            raise RuntimeError(f"Nessun manifest di backup trovato nel namespace Telegram {namespace!r}")
 
         if args.list:
             for s in summaries:
@@ -93,7 +125,7 @@ async def restore_async(args) -> None:
         if args.backup_id:
             selected = next((s for s in summaries if s.backup_id == args.backup_id), None)
             if not selected:
-                raise RuntimeError(f"Backup non trovato: {args.backup_id}")
+                raise RuntimeError(f"Backup non trovato nel namespace {namespace!r}: {args.backup_id}")
         else:
             selected = choose_summary(summaries)
 

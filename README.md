@@ -1,35 +1,37 @@
+![Telegram DAR Backup](./assets/telegram-dar-backup-icon.png)
+
 # 📦 Telegram DAR Backup
 
 Automated, encrypted, off-site backups from a Debian/Linux NAS to a **private Telegram channel**.
 
-The project combines **DAR (Disk ARchive)** and **Telethon** to create encrypted FULL and differential backups, split them into Telegram-friendly slices, upload each slice progressively, and restore the data later without requiring a full backup-sized temporary disk.
+The project combines **DAR (Disk ARchive)** and **Telethon** to create encrypted FULL and differential backups, split them into Telegram-friendly slices, upload each slice progressively, and restore the data without requiring temporary space equal to the whole backup.
 
 > [!IMPORTANT]
-> Telegram should be treated as an **additional off-site backup copy**, not as the only backup of important data. The archives are encrypted locally before upload, but Telegram itself is not a dedicated backup service with a storage SLA.
+> Telegram should be treated as an **additional off-site backup copy**, not as the only backup of important data. The archives are encrypted locally before upload, but Telegram is not a dedicated backup service with a storage SLA.
 
 ---
 
 ## ✨ Features
 
-- 🔐 **Encrypted DAR archives** before anything is uploaded
-- 🗜️ **Zstandard compression** by default
-- 🧩 **1900 MiB slices**, suitable for standard Telegram file limits
-- ☁️ **Progressive upload**: each completed slice is hashed, uploaded, then removed locally
-- 📆 **Automatic FULL + differential strategy**
-- 🔄 **New FULL every 6 months** by default
-- 📉 Monthly **DIFF backups against the latest FULL**
-- ✅ **SHA-512 verification** for every slice
-- 🧾 JSON **manifests** containing the information required for recovery
-- ♻️ **Safe rotation**: older backups are removed only after the new backup is complete
-- 💾 **Low temporary-space requirements** during backup and restore
-- 🛠️ **Headless operation** through SSH/terminal; no graphical interface required
-- ⏰ Included **systemd service and timer** for monthly automation
-- 🧪 Backup verification without extracting files
-- 🚑 Disaster recovery even if the original NAS is lost
+- 🔐 encrypted DAR archives before upload
+- 🗜️ Zstandard compression by default
+- 🧩 1900 MiB slices, below Telegram's standard 2 GB file limit
+- ☁️ progressive upload and progressive restore
+- ⚡ configurable parallel MTProto upload and download for large slices
+- 📆 automatic FULL + differential policy
+- 📉 every DIFF references the current FULL directly, not the previous DIFF
+- ✅ SHA-512 recorded and checked for every slice
+- 🧾 JSON manifests stored in Telegram
+- ♻️ safe rotation only after the replacement backup is committed
+- 💾 temporary disk usage around one slice during normal backup/restore
+- ⏰ included systemd service and monthly timer
+- 🧪 `--verify` for end-to-end archive validation without extraction
+- 🧪 isolated automated FULL/DIFF/restore/rotation self-test in the **same Telegram channel**
+- 🚑 recovery possible without the original NAS state
 
 ---
 
-## 🧠 How it works
+# 🧠 How it works
 
 A FULL backup is created the first time the project runs.
 
@@ -45,11 +47,9 @@ DAR + compression + encryption
     └── ...
 ```
 
-Each slice is uploaded as soon as DAR finishes writing it. This means the NAS does **not** need enough temporary space to hold the entire backup.
+After a FULL, an encrypted isolated DAR catalogue is stored locally and on Telegram. Later DIFF backups use that FULL catalogue as their reference.
 
-After a FULL backup, an encrypted isolated DAR catalogue is created and stored both locally and on Telegram. That catalogue becomes the reference for later differential backups.
-
-With the default policy:
+With `FULL_EVERY_MONTHS=6` the normal policy is:
 
 ```text
 Month 1  FULL A
@@ -61,9 +61,7 @@ Month 6  FULL A + DIFF F
 Month 7  new FULL G
 ```
 
-Each DIFF is calculated against the current FULL, not against the previous DIFF.
-
-Therefore, restoring month 5 requires only:
+A DIFF always references the FULL directly, so restoring month 5 needs only:
 
 ```text
 FULL A
@@ -71,29 +69,36 @@ FULL A
 DIFF E
 ```
 
-rather than replaying every monthly backup in between.
+not all intermediate DIFFs.
 
 ---
 
-## 🧾 Backup manifests
+## 🧾 Manifests and backup namespaces
 
-Every completed backup publishes a JSON manifest to the Telegram channel.
+Every completed backup publishes a JSON manifest containing:
 
-A manifest contains information such as:
-
-- backup ID
-- creation timestamp
+- backup ID and timestamp
 - FULL or DIFF type
-- reference FULL backup
-- slice names
-- slice sizes
-- SHA-512 hashes
+- reference FULL ID
+- logical backup namespace
+- slice names, sizes and SHA-512 hashes
 - Telegram message IDs
-- FULL catalogue information when applicable
+- FULL catalogue metadata when applicable
 
-The manifest does **not** contain the DAR encryption password.
+The DAR passphrase is **not** stored in the manifest.
 
-This allows the restore script to reconstruct the backup set from Telegram even if the original NAS no longer exists.
+`TDB_NAMESPACE` logically separates independent backup sets stored in the same Telegram channel:
+
+```dotenv
+TDB_NAMESPACE=default
+```
+
+Normal installations should leave it at `default`.
+
+> [!NOTE]
+> Backups created before namespace support did not contain `ns=` metadata. They are automatically treated as belonging to the `default` namespace, so existing backups remain compatible.
+
+Rotation is restricted to the active namespace. This is also what allows the automated self-test to create and rotate FULL/DIFF generations in the production Telegram channel without touching real backup messages.
 
 ---
 
@@ -101,16 +106,21 @@ This allows the restore script to reconstruct the backup set from Telegram even 
 
 ```text
 telegram-dar-backup/
+├── assets/
+│   ├── telegram-dar-backup-logo.jpg
+│   └── telegram-dar-backup-icon.png
 ├── backup.py                  # FULL/DIFF backup and rotation
-├── restore.py                 # list, verify and restore backups
-├── restore_fetch.py           # progressive download hook for DAR
-├── slice_upload.py            # progressive upload hook for DAR
+├── restore.py                 # list, verify and restore
+├── restore_fetch.py           # progressive DAR download hook
+├── slice_upload.py            # progressive DAR upload hook
+├── telegram_parallel.py       # parallel MTProto transfer helpers
 ├── telegram_login.py          # initial Telegram authentication
+├── selftest.py                # isolated reusable end-to-end test
 ├── tdb_common.py              # shared helpers
-├── config.env.example         # example configuration
+├── config.env.example
 ├── requirements.txt
 ├── install.sh
-├── .gitignore
+├── uninstall.sh
 └── systemd/
     ├── telegram-dar-backup.service
     └── telegram-dar-backup.timer
@@ -120,40 +130,15 @@ telegram-dar-backup/
 
 # 🚀 Installation
 
-## 1. Requirements
-
-A Debian-based Linux system or NAS with:
-
-- Python 3
-- `python3-venv`
-- DAR
-- Internet access
-- enough free temporary space for at least a few backup slices
-- a Telegram account with access to a private backup channel
-- a Telegram API ID and API Hash
-
-No desktop environment is required.
-
-The entire setup can be performed through SSH.
-
----
-
-## 2. Download the project
-
-Clone the repository and enter the project directory:
+Requirements: Debian-based Linux/NAS, Internet access, a Telegram account with access to a private channel, and Telegram API credentials.
 
 ```bash
 git clone <repository-url>
 cd telegram-dar-backup
-```
-
-Then run the installer:
-
-```bash
 sudo ./install.sh
 ```
 
-The installer creates the main directories and installs the project under:
+The installer installs DAR, rsync, Python/venv dependencies and the project under:
 
 ```text
 /opt/telegram-dar-backup/
@@ -161,85 +146,178 @@ The installer creates the main directories and installs the project under:
 /var/lib/telegram-dar-backup/
 ```
 
-It also installs:
-
-```text
-/etc/systemd/system/telegram-dar-backup.service
-/etc/systemd/system/telegram-dar-backup.timer
-```
-
-A Python virtual environment is created at:
-
-```text
-/opt/telegram-dar-backup/venv/
-```
-
-If no DAR password already exists, the installer generates a random passphrase and stores it in:
+If no passphrase exists, it creates:
 
 ```text
 /etc/telegram-dar-backup/dar.pass
 ```
 
-with restrictive permissions.
+> [!CAUTION]
+> Keep a secure copy of the DAR passphrase **outside the NAS**. Without it, encrypted backups cannot be restored.
+
+---
+
+# 🗑️ Uninstall
+
+The project includes a safe uninstaller. You can run either the repository copy:
+
+```bash
+sudo ./uninstall.sh
+```
+
+or, after installation, the installed copy:
+
+```bash
+sudo /opt/telegram-dar-backup/uninstall.sh
+```
+
+The normal uninstall:
+
+- stops and disables `telegram-dar-backup.timer`;
+- stops `telegram-dar-backup.service` if it is running;
+- removes the installed systemd unit files;
+- removes `/opt/telegram-dar-backup`;
+- **preserves** `/etc/telegram-dar-backup`;
+- **preserves** `/var/lib/telegram-dar-backup`;
+- does **not** remove DAR, rsync, Python or other apt packages that may be shared;
+- does **not** delete any backup messages from Telegram.
+
+Preserving `/etc` and `/var/lib` keeps the local configuration, DAR passphrase, Telegram session and catalogue/state data available for a later reinstall or recovery.
+
+## Purge local data
+
+To also remove the standard local configuration, secrets and state directories:
+
+```bash
+sudo ./uninstall.sh --purge-local-data
+```
+
+The script requires typing:
+
+```text
+DELETE LOCAL DATA
+```
+
+before proceeding.
+
+For intentional non-interactive use:
+
+```bash
+sudo ./uninstall.sh --purge-local-data --yes
+```
 
 > [!CAUTION]
-> Keep a secure copy of the DAR password somewhere **outside the NAS**. Without it, encrypted backups cannot be restored.
+> `--purge-local-data` removes `/etc/telegram-dar-backup` and `/var/lib/telegram-dar-backup`, including `dar.pass`, `config.env`, the Telegram session and local catalogues. Telegram backup messages are still left untouched. If you do not have the DAR passphrase stored safely elsewhere, deleting it can make the encrypted Telegram backups impossible to restore.
+
+Custom files or state configured outside those standard directories are not removed automatically.
+
+---
+
+# 🔄 Updating an existing installation
+
+The Git clone and `/opt/telegram-dar-backup` are separate. Pulling commits does not update the installed scripts until `install.sh` is run again.
+
+Check that a backup is not running:
+
+```bash
+systemctl is-active telegram-dar-backup.service
+```
+
+Then:
+
+```bash
+cd /path/to/telegram-dar-backup
+git fetch origin
+git switch main
+git pull --ff-only
+sudo ./install.sh
+```
+
+The installer intentionally preserves:
+
+```text
+/etc/telegram-dar-backup/config.env
+/etc/telegram-dar-backup/dar.pass
+/var/lib/telegram-dar-backup/telegram.session
+/var/lib/telegram-dar-backup/catalogs/
+```
+
+Existing `config.env` files are not overwritten. Compare them with the current example after an update:
+
+```bash
+diff -u /etc/telegram-dar-backup/config.env ./config.env.example || true
+```
+
+The output may contain secrets; inspect it only in a trusted terminal.
+
+## Testing a feature branch
+
+```bash
+cd /path/to/telegram-dar-backup
+git fetch origin
+git switch <branch-name>
+git pull --ff-only origin <branch-name>
+sudo ./install.sh
+```
+
+Return to main with:
+
+```bash
+git switch main
+git pull --ff-only
+sudo ./install.sh
+```
+
+The existing Telegram session and DAR password are preserved.
 
 ---
 
 # 📡 Telegram setup
 
-## 3. Create a private channel
+Create a dedicated private Telegram channel and obtain `api_id` and `api_hash` from `my.telegram.org`.
 
-Create a dedicated **private Telegram channel** for backups.
+Initial login:
 
-A dedicated Telegram account for the NAS is optional, but can be useful to keep automated activity separate from a personal account.
-
-The Telegram account used by this project must be able to:
-
-- access the private channel
-- publish files/messages
-- read the channel history
-- delete old backup messages when rotation is enabled
-
-This project uses **Telethon / MTProto**, not a Telegram Bot Token.
-
----
-
-## 4. Create Telegram API credentials
-
-Open:
-
-<https://my.telegram.org>
-
-Create an application and obtain:
-
-```text
-api_id
-api_hash
+```bash
+sudo /opt/telegram-dar-backup/venv/bin/python \
+  /opt/telegram-dar-backup/telegram_login.py \
+  --config /etc/telegram-dar-backup/config.env
 ```
 
-These values are used by Telethon to authenticate the Telegram client.
+The script authenticates Telethon, saves the session and lists visible channel IDs. Put the selected private-channel ID in:
+
+```dotenv
+TELEGRAM_CHANNEL_ID=-1001234567890
+```
+
+Protect the session:
+
+```bash
+sudo chmod 600 /var/lib/telegram-dar-backup/telegram.session
+```
+
+The session file is an authentication credential.
 
 ---
 
 # ⚙️ Configuration
 
-Edit the installed configuration file:
+Edit:
 
 ```bash
 sudo nano /etc/telegram-dar-backup/config.env
 ```
 
-A complete documented example is available in `config.env.example`. Most installations only need to change the Telegram credentials, channel ID and source path; the remaining defaults can usually be kept as-is.
-
-Example:
+Typical configuration:
 
 ```dotenv
 TELEGRAM_API_ID=12345678
 TELEGRAM_API_HASH=0123456789abcdef0123456789abcdef
 TELEGRAM_CHANNEL_ID=-1001234567890
 TELEGRAM_SESSION_FILE=/var/lib/telegram-dar-backup/telegram.session
+TELEGRAM_UPLOAD_WORKERS=4
+TELEGRAM_DOWNLOAD_WORKERS=4
+TDB_NAMESPACE=default
 
 SOURCE=/mnt/data
 SOURCE_LABEL=NAS-DATA
@@ -254,170 +332,47 @@ KEEP_ONLY_LATEST_DIFF=true
 DAR_PASSPHRASE_FILE=/etc/telegram-dar-backup/dar.pass
 ```
 
-## 🧭 Configuration quick reference
+| Variable | Purpose |
+| --- | --- |
+| `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | Telegram API credentials |
+| `TELEGRAM_CHANNEL_ID` | private channel used for backup storage |
+| `TELEGRAM_SESSION_FILE` | persistent authenticated Telethon session |
+| `TELEGRAM_UPLOAD_WORKERS` | parallel upload requests; default `4` |
+| `TELEGRAM_DOWNLOAD_WORKERS` | independent MTProto download connections; default `4` |
+| `TDB_NAMESPACE` | logical backup set inside the channel; normally `default` |
+| `SOURCE` | source directory/filesystem |
+| `SOURCE_LABEL` | descriptive label stored in manifests |
+| `REQUIRE_SOURCE_MOUNT` | refuse backup if `SOURCE` is expected to be a mount but is not mounted |
+| `WORK_DIR` | local runtime state and FULL catalogue cache |
+| `SLICE_SIZE` | DAR slice size; default `1900M` |
+| `COMPRESSION` | DAR compression; default `zstd:6` |
+| `FULL_EVERY_MONTHS` | age at which auto mode starts a new FULL |
+| `KEEP_ONLY_LATEST_DIFF` | keep only the newest DIFF for the current FULL |
+| `DAR_PASSPHRASE_FILE` | root-only DAR encryption passphrase file |
 
-| Variable | Required? | What to do |
-| --- | --- | --- |
-| `TELEGRAM_API_ID` | Yes | Replace with the `api_id` obtained from `my.telegram.org`. |
-| `TELEGRAM_API_HASH` | Yes | Replace with the `api_hash` obtained from `my.telegram.org`. |
-| `TELEGRAM_CHANNEL_ID` | Yes, after first login | Run `telegram_login.py`, find the private backup channel in the printed list, then copy its numeric ID here **including the leading `-100`**. |
-| `TELEGRAM_SESSION_FILE` | No | Usually leave unchanged. This is where Telethon stores the authenticated session. |
-| `SOURCE` | Yes | Set this to the directory or mounted filesystem that must be backed up. |
-| `SOURCE_LABEL` | No | Friendly name written to backup metadata. It does not affect which files are backed up. |
-| `REQUIRE_SOURCE_MOUNT` | Usually | Use `true` when `SOURCE` is itself a mounted disk/filesystem; use `false` when `SOURCE` is a normal directory or subdirectory. |
-| `WORK_DIR` | No | Usually leave unchanged. It stores runtime state, temporary files and the local FULL catalogue cache. |
-| `SLICE_SIZE` | No | Usually leave `1900M`, which stays below Telegram's standard 2 GB file limit. |
-| `COMPRESSION` | No | Usually leave `zstd:6`. Lower values such as `zstd:3` use less CPU. |
-| `FULL_EVERY_MONTHS` | No | Number of months before a new FULL generation is created. Default: `6`. |
-| `KEEP_ONLY_LATEST_DIFF` | No | `true` keeps only the latest DIFF for the current FULL; `false` retains older monthly DIFF restore points. |
-| `DAR_PASSPHRASE_FILE` | Recommended | Path to the file containing the DAR encryption password. The installer creates it automatically by default. |
+## Source mount protection
 
-## ✅ Recommended configuration order
-
-For a first installation, configure the project in this order:
-
-1. Set `TELEGRAM_API_ID` and `TELEGRAM_API_HASH`.
-2. Set `SOURCE` and decide whether `REQUIRE_SOURCE_MOUNT` should be `true` or `false`.
-3. Leave `TELEGRAM_CHANNEL_ID` with its temporary/example value for the moment.
-4. Run `telegram_login.py` as described in the **First Telegram login** section below.
-5. Copy the ID printed next to the desired private channel into `TELEGRAM_CHANNEL_ID`.
-6. Check the generated DAR password and store a secure copy of it somewhere outside the NAS.
-7. Run a manual FULL backup before enabling the systemd timer.
-
-Protect the configuration file:
-
-```bash
-sudo chown root:root /etc/telegram-dar-backup/config.env
-sudo chmod 600 /etc/telegram-dar-backup/config.env
-```
-
----
-
-## 🔒 Source mount protection
-
-`REQUIRE_SOURCE_MOUNT` is a safety feature designed to avoid silently backing up the wrong directory when a disk is missing.
-
-If `SOURCE` is the mount point of the disk/filesystem itself, for example:
+For an actual mounted data filesystem:
 
 ```dotenv
 SOURCE=/mnt/data
 REQUIRE_SOURCE_MOUNT=true
 ```
 
-then the backup refuses to start unless `/mnt/data` is actually mounted. This prevents a failed disk mount from turning `/mnt/data` into an ordinary empty directory that would otherwise produce an incorrect backup.
-
-If `SOURCE` intentionally points to a normal directory or a subdirectory inside another filesystem, for example:
+For a normal directory/subdirectory:
 
 ```dotenv
-SOURCE=/mnt/storage/documents
+SOURCE=/mnt/data/documents
 REQUIRE_SOURCE_MOUNT=false
 ```
 
-then the mount-point check is disabled.
-
-> [!TIP]
-> If you are backing up an entire HDD, RAID volume or dedicated NAS data filesystem, `REQUIRE_SOURCE_MOUNT=true` is normally the safer choice.
-
----
-
-# 🔐 Encryption password
-
-The recommended setup uses:
-
-```dotenv
-DAR_PASSPHRASE_FILE=/etc/telegram-dar-backup/dar.pass
-```
-
-The password file should contain only the passphrase on a single line.
-
-Protect it with:
-
-```bash
-sudo chown root:root /etc/telegram-dar-backup/dar.pass
-sudo chmod 600 /etc/telegram-dar-backup/dar.pass
-```
-
-An alternative is to store the password directly in `config.env`:
-
-```dotenv
-DAR_PASSPHRASE=a-long-random-password
-```
-
-Using a separate password file is generally cleaner.
-
-The password is not passed directly as a visible DAR command-line argument. The scripts generate a temporary DAR command file with restrictive permissions instead.
-
-> [!WARNING]
-> Do not lose the encryption password. There is no recovery mechanism for an unknown DAR passphrase.
-
----
-
-# 🔑 First Telegram login
-
-Run:
-
-```bash
-sudo /opt/telegram-dar-backup/venv/bin/python \
-  /opt/telegram-dar-backup/telegram_login.py \
-  --config /etc/telegram-dar-backup/config.env
-```
-
-Telethon may ask for:
-
-```text
-Telegram phone number: +...
-Telegram code: 12345
-2FA password: ********
-```
-
-This is required only when creating or re-authenticating the Telethon session.
-
-After login, the script lists the Telegram channels visible to the account, for example:
-
-```text
--1001234567890  Backup Channel
-```
-
-Copy the desired ID into:
-
-```dotenv
-TELEGRAM_CHANNEL_ID=-1001234567890
-```
-
-The authenticated Telethon session is stored at:
-
-```text
-/var/lib/telegram-dar-backup/telegram.session
-```
-
-Protect it:
-
-```bash
-sudo chmod 600 /var/lib/telegram-dar-backup/telegram.session
-```
-
-> [!CAUTION]
-> The Telethon session is an authentication credential. Protect it like a password.
+This prevents accidentally backing up an empty mount directory when the real disk is missing.
 
 ---
 
 # 💾 Creating backups
 
-## First manual backup
-
-Before enabling automation, start a backup manually:
-
-```bash
-sudo systemctl start telegram-dar-backup.service
-```
-
-Follow its log:
-
-```bash
-sudo journalctl -fu telegram-dar-backup.service
-```
-
-Or run the Python script directly:
+Automatic decision (the mode used by systemd):
 
 ```bash
 sudo /opt/telegram-dar-backup/venv/bin/python \
@@ -425,11 +380,15 @@ sudo /opt/telegram-dar-backup/venv/bin/python \
   --config /etc/telegram-dar-backup/config.env
 ```
 
-The first backup is automatically a **FULL** backup.
+Behavior:
 
----
+```text
+no FULL exists                    -> FULL
+latest FULL age < N months        -> DIFF
+latest FULL age >= N months       -> new FULL
+```
 
-## Force a FULL backup
+Force a FULL:
 
 ```bash
 sudo /opt/telegram-dar-backup/venv/bin/python \
@@ -438,9 +397,7 @@ sudo /opt/telegram-dar-backup/venv/bin/python \
   --force full
 ```
 
----
-
-## Force a differential backup
+Force a DIFF:
 
 ```bash
 sudo /opt/telegram-dar-backup/venv/bin/python \
@@ -449,142 +406,57 @@ sudo /opt/telegram-dar-backup/venv/bin/python \
   --force diff
 ```
 
-A DIFF requires an existing valid FULL backup.
+A DIFF requires a valid FULL in the same namespace.
 
 ---
 
-# ☁️ Progressive upload
+# ☁️ Progressive and parallel transfers
 
-The default slice size is:
+Defaults:
 
 ```dotenv
 SLICE_SIZE=1900M
+TELEGRAM_UPLOAD_WORKERS=4
+TELEGRAM_DOWNLOAD_WORKERS=4
 ```
 
-DAR produces files such as:
+Upload workers keep multiple 512 KiB MTProto file-part requests in flight. Download workers use independent MTProto connections and interleaved 512 KiB offsets inside the **same** DAR slice.
 
-```text
-archive.0001.dar
-archive.0002.dar
-archive.0003.dar
-...
-```
+Only one DAR slice is kept locally at a time, so download worker count does not multiply normal restore temporary-space requirements.
 
-For every completed slice:
+Set either worker value to `1` to use the normal Telethon path for comparison/compatibility.
 
-```text
-DAR closes slice
-      ↓
-calculate SHA-512
-      ↓
-upload with Telethon
-      ↓
-verify remote size
-      ↓
-record Telegram message ID
-      ↓
-delete local slice
-```
+Higher worker counts do not guarantee higher throughput; routing, the Telegram DC, account/server limits and the Internet connection may become the bottleneck.
 
-DAR waits for the upload hook before continuing, so the NAS does not accumulate hundreds of gigabytes of temporary archive data.
-
-The final slice of a FULL may be retained briefly while the isolated catalogue is created, then removed as well.
+Every downloaded slice is checked for expected size and SHA-512 before DAR consumes it.
 
 ---
 
-# 📦 Temporary disk-space usage
+# ♻️ Rotation and failure safety
 
-With 1900 MiB slices, only a small amount of temporary disk space is normally required:
-
-```text
-~2 GB current slice
-+ DAR catalogue
-+ small state/journal files
-```
-
-The exact catalogue size depends mostly on the number of files being backed up.
-
-A 1 TB source therefore does **not** require 1 TB of free temporary space.
-
----
-
-# ♻️ Backup rotation and failure safety
-
-Older valid backups are never removed before the replacement backup has completed.
-
-The workflow is:
+A previous valid backup is not deleted until the replacement has completed and its `COMPLETE` manifest has been published.
 
 ```text
 existing valid backup
         ↓
-create new backup
+create replacement
         ↓
-upload all slices
-        ↓
-upload catalogue if FULL
+upload slices/catalogue
         ↓
 publish COMPLETE manifest
         ↓
-new backup committed
+replacement committed
         ↓
-rotate old backup generation
+rotate older backups in SAME namespace
 ```
 
-If the backup fails before the `COMPLETE` manifest is published, the previous valid backup remains untouched.
+If creation fails before commit, the previous generation remains intact. If cleanup fails after commit, both generations may temporarily remain, which is safer than deleting the valid copy too early.
 
-If the new backup is already complete but cleanup of the previous generation fails, both generations may remain temporarily. This is intentionally safer than deleting a valid backup too early.
-
-With:
-
-```dotenv
-KEEP_ONLY_LATEST_DIFF=true
-```
-
-the previous differential is removed only after the new differential is valid.
-
-When a new FULL is created, the previous FULL generation is rotated only after the replacement FULL succeeds.
+With `KEEP_ONLY_LATEST_DIFF=true`, the previous DIFF for the same FULL is removed only after the new DIFF is valid.
 
 ---
 
-# ⏰ Automatic monthly backups
-
-The supplied systemd timer runs on the first day of every month at 03:15, with a randomized delay of up to 20 minutes.
-
-Enable it with:
-
-```bash
-sudo systemctl enable --now telegram-dar-backup.timer
-```
-
-Check the next scheduled run:
-
-```bash
-systemctl list-timers telegram-dar-backup.timer
-```
-
-View logs:
-
-```bash
-sudo journalctl -u telegram-dar-backup.service
-```
-
-To change the schedule:
-
-```bash
-sudo systemctl edit --full telegram-dar-backup.timer
-```
-
-Then reload systemd:
-
-```bash
-sudo systemctl daemon-reload
-```
-
----
-
-# 🔎 Listing available backups
-
-Run:
+# 🔎 Listing backups
 
 ```bash
 sudo /opt/telegram-dar-backup/venv/bin/python \
@@ -593,27 +465,11 @@ sudo /opt/telegram-dar-backup/venv/bin/python \
   --list
 ```
 
-Example output:
-
-```text
-2026-08-01T03:20:00Z  FULL  20260801T032000Z_FULL_ab12cd
-2026-09-01T03:20:00Z  DIFF  20260901T032000Z_DIFF_ef34aa  base=20260801T032000Z_FULL_ab12cd
-```
+Only manifests in the configured `TDB_NAMESPACE` are listed.
 
 ---
 
-# ✅ Verifying a backup
-
-A backup can be tested without extracting it.
-
-Interactive verification:
-
-```bash
-sudo /opt/telegram-dar-backup/venv/bin/python \
-  /opt/telegram-dar-backup/restore.py \
-  --config /etc/telegram-dar-backup/config.env \
-  --verify
-```
+# ✅ What `--verify` guarantees
 
 Verify a specific backup:
 
@@ -621,54 +477,39 @@ Verify a specific backup:
 sudo /opt/telegram-dar-backup/venv/bin/python \
   /opt/telegram-dar-backup/restore.py \
   --config /etc/telegram-dar-backup/config.env \
-  --backup-id 20260901T032000Z_DIFF_ef34aa \
+  --backup-id BACKUP_ID \
   --verify
 ```
 
-Verification progressively:
+For each required archive it:
 
-1. downloads each slice from Telegram;
-2. checks its size;
-3. recalculates SHA-512;
-4. asks DAR to test the encrypted archive.
+1. downloads the real slices from Telegram;
+2. checks expected file size;
+3. recalculates SHA-512 and compares it with the manifest;
+4. decrypts/reads the archive using the configured passphrase;
+5. runs DAR archive test (`dar -t`) without extracting files.
 
-If a DIFF is selected, its reference FULL is verified too.
+If the selected backup is a DIFF, the reference FULL is verified too.
 
-Regular verification is strongly recommended because it tests the actual cloud copy rather than only local metadata.
+A successful verify therefore demonstrates that the Telegram copy is present, byte-integral relative to the recorded hashes, decryptable and readable by DAR.
+
+It does **not** replace a real restore test: extraction semantics and final filesystem state are tested by restoring and comparing the result.
 
 ---
 
-# 🚑 Restoring a backup
+# 🚑 Restoring
 
-Prepare an empty destination directory or mount point, for example:
-
-```text
-/mnt/restore
-```
-
-Then run:
+Restore a specific backup into an empty destination:
 
 ```bash
 sudo /opt/telegram-dar-backup/venv/bin/python \
   /opt/telegram-dar-backup/restore.py \
   --config /etc/telegram-dar-backup/config.env \
+  --backup-id BACKUP_ID \
   --dest /mnt/restore
 ```
 
-If no backup ID is specified, an interactive menu is displayed.
-
-Example:
-
-```text
-Available backups:
-
-  [1] 2026-09-01T03:20:00Z DIFF  20260901T032000Z_DIFF_ef34aa
-  [2] 2026-08-01T03:20:00Z FULL  20260801T032000Z_FULL_ab12cd
-
-Backup number to restore:
-```
-
-When restoring a DIFF, the script automatically restores:
+For a DIFF the script automatically applies:
 
 ```text
 reference FULL
@@ -678,191 +519,239 @@ selected DIFF
 final filesystem state
 ```
 
-This includes changes recorded by DAR, including deletions represented by the differential archive.
+The restore is progressive: DAR asks for slices one at a time and `restore_fetch.py` downloads/verifies them as needed.
+
+The destination must have enough space for the recovered data.
 
 ---
 
-## Restore a specific backup
+# 🧪 Automated isolated end-to-end self-test
 
-```bash
-sudo /opt/telegram-dar-backup/venv/bin/python \
-  /opt/telegram-dar-backup/restore.py \
-  --config /etc/telegram-dar-backup/config.env \
-  --backup-id 20260901T032000Z_DIFF_ef34aa \
-  --dest /mnt/restore
-```
+`selftest.py` is intended to be run after installation and again after meaningful code changes.
 
-For safety, the destination is expected to be empty.
+It uses the **same Telegram channel, authenticated session and DAR passphrase** as the real installation, but it does not use the real source data and does not share the real backup state.
 
-To deliberately restore into a non-empty destination:
-
-```bash
-sudo /opt/telegram-dar-backup/venv/bin/python \
-  /opt/telegram-dar-backup/restore.py \
-  --config /etc/telegram-dar-backup/config.env \
-  --backup-id 20260901T032000Z_DIFF_ef34aa \
-  --dest /mnt/restore \
-  --allow-nonempty
-```
-
-Use `--allow-nonempty` carefully.
-
----
-
-# 📥 Progressive restore
-
-The restore process does not download the whole backup before extraction.
-
-DAR runs in sequential-read mode and obtains slices one at a time:
+The tester creates a unique namespace such as:
 
 ```text
-restore_fetch.py
-      ↓
-download requested Telegram slice
-      ↓
-verify size
-      ↓
-verify SHA-512
-      ↓
-DAR reads the slice
-      ↓
-move to the next slice
+selftest-a1b2c3d4e5f6
 ```
 
-Temporary storage therefore stays roughly around the size of one slice rather than the size of the entire archive.
+All self-test slices, catalogues, manifests and rotations are tagged with that namespace. The production namespace (`default` unless changed explicitly) is therefore invisible to self-test rotation.
 
-The restore destination must of course have enough free space for the recovered data.
+The tester also takes the real `backup.lock` for its duration, so the systemd backup cannot start concurrently.
+
+## What it creates
+
+By default it creates approximately **2000 MiB of incompressible random data** plus small files, directories, a hardlink, a symlink and metadata fixtures.
+
+It intentionally keeps:
+
+```dotenv
+SLICE_SIZE=1900M
+```
+
+so the first FULL must contain **at least two real DAR slices**.
+
+Use a filesystem with roughly **7-8 GiB free** for the default test. `/var/tmp` is used by default; choose another filesystem with `--temp-root` if needed.
+
+## What it tests
+
+The complete sequence is automated:
+
+```text
+FULL A
+  -> assert >=2 slices
+  -> --verify
+  -> real restore into empty WORK_DIR
+  -> rsync dry-run comparison
+
+modify + delete + add + rename
+DIFF B -> FULL A
+  -> --verify
+  -> restore FULL A + DIFF B
+  -> rsync comparison
+
+delete local FULL catalogue
+modify data
+DIFF C -> FULL A
+  -> catalogue must be recovered from Telegram
+  -> previous DIFF B must rotate
+  -> --verify
+  -> restore and compare
+
+FULL D
+  -> new generation
+  -> old FULL A/DIFF C generation must rotate
+  -> --verify
+
+modify/delete/add again
+DIFF E -> FULL D
+  -> --verify
+  -> final restore and compare
+
+auto mode
+  -> recent FULL D must cause a new DIFF
+
+final safety check
+  -> real namespace manifest IDs must be exactly unchanged
+```
+
+Restore/verify operations use a separate, repeatedly emptied recovery `WORK_DIR`, so they cannot rely on the self-test backup catalogue cache or previous restore state. They must reconstruct what they need from Telegram.
+
+The filesystem comparison is:
+
+```bash
+rsync -aHAXnci --delete SOURCE/ RESTORED/
+```
+
+The `-n` means **dry-run**: it does not delete or change the source or restore. `--delete` is useful here only to detect extra files that should not exist in the restored tree.
+
+## Run it
+
+Because the test performs several real Telegram transfers, running it inside `tmux` is recommended:
+
+```bash
+tmux new -s tdb-selftest
+```
+
+Then:
+
+```bash
+sudo /opt/telegram-dar-backup/venv/bin/python \
+  /opt/telegram-dar-backup/selftest.py \
+  --config /etc/telegram-dar-backup/config.env
+```
+
+To place temporary data on another filesystem:
+
+```bash
+sudo /opt/telegram-dar-backup/venv/bin/python \
+  /opt/telegram-dar-backup/selftest.py \
+  --config /etc/telegram-dar-backup/config.env \
+  --temp-root /mnt/fast-disk/selftest
+```
+
+The normal test cleans both its local temporary directory and its Telegram `selftest-*` messages even when a test stage raises an ordinary Python error.
+
+> [!IMPORTANT]
+> No program can guarantee cleanup after `SIGKILL`, power loss or another abrupt process termination. If that happens, the orphan self-test messages are still isolated from real backups. The output prints the namespace; clean it later with:
+
+```bash
+sudo /opt/telegram-dar-backup/venv/bin/python \
+  /opt/telegram-dar-backup/selftest.py \
+  --config /etc/telegram-dar-backup/config.env \
+  --cleanup-namespace selftest-XXXXXXXXXXXX
+```
+
+For safety, the cleanup command refuses namespaces that do not begin with `selftest-`.
+
+## What this self-test does not prove
+
+It strongly tests the real Telegram/DAR backup path on the current machine, including stateless local restore state, but it still reuses the existing authenticated Telegram session.
+
+For the strongest disaster-recovery validation, perform at least one additional restore on a clean Debian machine/VM by authenticating Telegram again and supplying the independently stored DAR passphrase.
+
+---
+
+# ⏰ Automatic monthly backups
+
+Enable the included timer:
+
+```bash
+sudo systemctl enable --now telegram-dar-backup.timer
+```
+
+Inspect it:
+
+```bash
+systemctl list-timers telegram-dar-backup.timer
+```
+
+Logs:
+
+```bash
+sudo journalctl -u telegram-dar-backup.service
+```
 
 ---
 
 # 🆘 Disaster recovery after losing the NAS
 
-The restore design intentionally avoids depending on the original NAS state.
+The restore path does not depend on the original `WORK_DIR`.
 
-To recover on a new Debian machine, you need:
+On a replacement Debian machine you need:
 
-1. access to the Telegram account/channel containing the backups;
-2. the Telegram API ID and API Hash;
-3. the DAR encryption password;
+1. access to the Telegram account and backup channel;
+2. Telegram API ID and API Hash;
+3. the DAR encryption passphrase;
 4. this project;
-5. enough storage for the restored data.
+5. storage for the restored data.
 
-Install the project on the replacement machine, configure Telegram credentials, authenticate Telethon again with `telegram_login.py`, and run `restore.py`.
+Install the project, configure the Telegram credentials, authenticate again with `telegram_login.py`, set the same DAR passphrase and run `restore.py --list` / `restore.py --verify` / restore.
 
-The backup manifests stored in Telegram are used to discover the available FULL and DIFF generations.
+You do **not** need the old NAS's local catalogue cache, journals or old `telegram.session`; a new authorized session can be created.
 
-For disaster recovery, keep the following somewhere independent from the NAS:
+Keep independently:
 
 ```text
-DAR password
+DAR passphrase
 Telegram account recovery access
 Telegram API credentials
 ```
 
 ---
 
-# 🔄 Changing the encryption password
+# 🔐 Encryption password changes
 
-Differential backups depend on the catalogue of their reference FULL.
+Do not change the DAR passphrase in the middle of a FULL/DIFF generation.
 
-Do not change the encryption password in the middle of a FULL/DIFF generation.
+Safe procedure:
 
-A safe password-change procedure is:
-
-1. change `/etc/telegram-dar-backup/dar.pass`;
-2. force a new FULL backup;
-3. verify the new FULL;
-4. only then retire the old password and old backup generation.
-
-Force the new FULL with:
-
-```bash
-sudo /opt/telegram-dar-backup/venv/bin/python \
-  /opt/telegram-dar-backup/backup.py \
-  --config /etc/telegram-dar-backup/config.env \
-  --force full
-```
+1. change the passphrase file;
+2. force a new FULL;
+3. verify/restore the new FULL;
+4. only then retire the old passphrase/generation.
 
 ---
 
 # 🗜️ Compression
 
-Default configuration:
+Default:
 
 ```dotenv
 COMPRESSION=zstd:6
 ```
 
-This provides a reasonable balance between CPU usage and compression ratio.
-
-For data that is already compressed, such as:
-
-- JPEG photos
-- MP4/MKV video
-- MP3/AAC audio
-- ZIP/RAR/7z archives
-
-additional compression may be minimal. A lower setting such as:
-
-```dotenv
-COMPRESSION=zstd:3
-```
-
-may reduce CPU usage.
-
-For highly compressible data, higher levels may save more space at the cost of additional CPU time.
+Already-compressed media (JPEG, MP4, ZIP, etc.) usually gains little from stronger compression. `zstd:3` can reduce CPU use.
 
 ---
 
-# 🗃️ Files that change during backup
+# 🗃️ Files changing during backup
 
-DAR can detect and retry files that change while they are being read, but this is not equivalent to taking a filesystem snapshot.
+DAR can detect/retry some files that change while being read, but that is not equivalent to a filesystem snapshot.
 
-For mostly static data such as documents, media libraries, and archives, this is often sufficient.
-
-For frequently changing data such as:
-
-- databases
-- virtual machine images
-- application state
-- continuously written files
-
-prefer backing up a filesystem/LVM snapshot or quiescing the application before the backup starts.
+For databases, VM images or frequently changing application state, prefer a filesystem/LVM snapshot or quiesce the application first.
 
 ---
 
 # 🧬 Metadata preservation
 
-The systemd service runs as `root` so DAR can preserve as much filesystem metadata as possible, including where supported:
+The systemd service runs as root so DAR can preserve, where supported:
 
-- ownership
-- Unix permissions
-- hard links
-- symbolic links
+- ownership and Unix permissions
+- hard links and symbolic links
 - ACLs
 - extended attributes
 - sparse files
 
-For best results, restore onto a Linux filesystem that supports the same metadata, such as ext4, XFS, or Btrfs.
+For best results restore to a Linux filesystem supporting the same metadata.
 
 ---
 
 # 🛡️ Security notes
 
-The uploaded DAR slices are encrypted **before** they reach Telegram.
-
-Telegram therefore stores encrypted archive data plus limited operational metadata such as:
-
-```text
-backup ID
-FULL/DIFF type
-timestamp
-slice number
-hash
-Telegram message ID
-```
-
-Protect these local files carefully:
+DAR slices are encrypted before upload. Protect:
 
 ```text
 /etc/telegram-dar-backup/config.env
@@ -878,131 +767,49 @@ sudo chmod 600 /etc/telegram-dar-backup/dar.pass
 sudo chmod 600 /var/lib/telegram-dar-backup/telegram.session
 ```
 
-The Telegram session and DAR passphrase are both sensitive credentials.
-
-The project intentionally avoids placing the DAR password directly in the systemd command line.
-
----
-
-# 🧪 Recommended backup checks
-
-A backup strategy should be tested, not merely assumed to work.
-
-Recommended routine:
-
-- run `restore.py --verify` periodically;
-- occasionally perform a real restore into an empty directory or spare disk;
-- inspect several restored files manually;
-- keep an independent copy of the DAR password;
-- check systemd logs after scheduled runs.
-
-A backup whose restore path has been tested is far more trustworthy than one that has only been uploaded successfully.
-
 ---
 
 # 🛠️ Troubleshooting
 
-## `SOURCE is not a mount point`
+## `SOURCE` is not a mount point
 
-If the source should be a mounted disk, verify it:
-
-```bash
-mount | grep /mnt/data
-```
-
-If `SOURCE` intentionally points to a subdirectory, use:
+If `SOURCE` is intentionally a subdirectory, use:
 
 ```dotenv
 REQUIRE_SOURCE_MOUNT=false
 ```
 
----
+Otherwise verify the expected disk is mounted before running a backup.
 
 ## Telegram session is not authenticated
 
-Run the login process again:
-
-```bash
-sudo /opt/telegram-dar-backup/venv/bin/python \
-  /opt/telegram-dar-backup/telegram_login.py \
-  --config /etc/telegram-dar-backup/config.env
-```
-
----
-
-## Channel not found
-
-Run `telegram_login.py`, inspect the listed channels, and update:
-
-```dotenv
-TELEGRAM_CHANNEL_ID=-100...
-```
-
----
+Run `telegram_login.py` again.
 
 ## Wrong DAR password
 
-Check the value configured by:
+Check `DAR_PASSPHRASE_FILE`. An incorrect passphrase prevents DAR from reading encrypted catalogues/archives.
 
-```dotenv
-DAR_PASSPHRASE_FILE=...
-```
+## Internet or power failure during backup
 
-If the password is incorrect, DAR will not be able to read the encrypted catalogue or archive.
-
----
-
-## Internet connection fails during upload
-
-The current backup attempt fails and the previously valid backup generation remains intact.
-
-A later run can create a new backup attempt.
-
----
-
-## The NAS powers off during a backup
-
-Any previously published `COMPLETE` backup remains valid.
-
-Encrypted orphan slices from the interrupted backup may remain in the Telegram channel and can be cleaned up later.
-
----
-
-# 🔬 Upload verification
-
-For every slice, the project records or checks:
-
-1. local SHA-512 before upload;
-2. successful Telegram message creation;
-3. remote document size;
-4. Telegram message ID;
-5. SHA-512 stored in the final manifest.
-
-The strongest end-to-end test is still:
-
-```bash
-restore.py --verify
-```
-
-because it downloads the data again from Telegram, recalculates SHA-512, decrypts the archive and asks DAR to test it.
+Before the new `COMPLETE` manifest exists, the previous valid generation remains intact. Interrupted attempts can leave orphan encrypted Telegram messages, but they are not considered valid backups without a COMPLETE manifest.
 
 ---
 
 # ✅ Setup checklist
 
-- [ ] Create a private Telegram backup channel
-- [ ] Choose the Telegram account used for backups
-- [ ] Obtain Telegram API ID and API Hash
-- [ ] Run `install.sh`
-- [ ] Configure `/etc/telegram-dar-backup/config.env`
-- [ ] Store the generated DAR password somewhere safe outside the NAS
-- [ ] Run `telegram_login.py`
-- [ ] Set the correct `TELEGRAM_CHANNEL_ID`
-- [ ] Run a manual FULL backup
-- [ ] Run `restore.py --list`
-- [ ] Run `restore.py --verify`
-- [ ] Perform at least one test restore
-- [ ] Enable `telegram-dar-backup.timer`
+- [ ] create a private Telegram backup channel
+- [ ] obtain Telegram API ID and API Hash
+- [ ] run `install.sh`
+- [ ] configure `config.env`
+- [ ] store the DAR passphrase outside the NAS
+- [ ] run `telegram_login.py`
+- [ ] set the correct channel ID
+- [ ] run the isolated `selftest.py`
+- [ ] run `restore.py --list`
+- [ ] periodically run `restore.py --verify`
+- [ ] occasionally perform a real restore
+- [ ] perform at least one clean-machine disaster-recovery test for important data
+- [ ] enable the monthly systemd timer
 
 ---
 
@@ -1011,28 +818,17 @@ because it downloads the data again from Telegram, recalculates SHA-512, decrypt
 - [DAR project](https://dar.linux.free.fr/)
 - [DAR Debian manual](https://manpages.debian.org/testing/dar/dar.1.en.html)
 - [Telethon documentation](https://docs.telethon.dev/)
+- [Telegram file API](https://core.telegram.org/api/files)
 - [Telegram API credentials](https://my.telegram.org)
 
 ---
 
-# 💡 Recommended backup strategy
+# 💡 Backup strategy
 
-For important data, consider using this project as part of a broader **3-2-1 backup strategy**:
+For important data, use this project as part of a broader **3-2-1 strategy**:
 
-- **3 copies** of the data in total;
-- stored on at least **2 different types of storage or systems**;
-- with at least **1 copy kept off-site**.
+- 3 copies of the data;
+- on at least 2 different storage types/systems;
+- with at least 1 off-site copy.
 
-A typical layout could be:
-
-```text
-Primary NAS data
-      +
-local/offline backup
-      +
-encrypted off-site backup
-```
-
-Telegram DAR Backup can provide the **encrypted off-site copy** in such a strategy.
-
-It should not replace the other copies: the goal of the 3-2-1 approach is to avoid depending on a single disk, machine, location, or storage provider.
+Telegram DAR Backup can provide the encrypted off-site copy; it should not be the only backup.

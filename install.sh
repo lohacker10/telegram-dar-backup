@@ -12,12 +12,12 @@ ETC_DIR=/etc/telegram-dar-backup
 STATE_DIR=/var/lib/telegram-dar-backup
 
 apt-get update
-apt-get install -y dar python3 python3-venv python3-pip
+apt-get install -y dar rsync python3 python3-venv python3-pip
 
 install -d -m 0755 "$APP_DIR" "$ETC_DIR"
 install -d -m 0700 "$STATE_DIR"
 
-for f in backup.py restore.py restore_fetch.py slice_upload.py telegram_login.py tdb_common.py requirements.txt; do
+for f in backup.py restore.py restore_fetch.py slice_upload.py telegram_parallel.py telegram_login.py tdb_common.py selftest.py uninstall.sh requirements.txt; do
   install -m 0755 "$SRC_DIR/$f" "$APP_DIR/$f"
 done
 chmod 0644 "$APP_DIR/requirements.txt"
@@ -53,5 +53,8 @@ echo "Installation complete. Next steps:"
 echo "  1) nano $ETC_DIR/config.env"
 echo "  2) securely save the generated password (or replace it): nano $ETC_DIR/dar.pass"
 echo "  3) $APP_DIR/venv/bin/python $APP_DIR/telegram_login.py --config $ETC_DIR/config.env"
-echo "  4) test: systemctl start telegram-dar-backup.service"
-echo "  5) enable: systemctl enable --now telegram-dar-backup.timer"
+echo "  4) self-test: $APP_DIR/venv/bin/python $APP_DIR/selftest.py --config $ETC_DIR/config.env"
+echo "  5) test backup: systemctl start telegram-dar-backup.service"
+echo "  6) enable: systemctl enable --now telegram-dar-backup.timer"
+echo
+echo "Uninstall later with: sudo $APP_DIR/uninstall.sh"

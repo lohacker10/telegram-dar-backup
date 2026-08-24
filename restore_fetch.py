@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 
 from tdb_common import load_config, make_client, resolve_channel, sha512_file
+from telegram_parallel import download_document_parallel, parse_download_workers
 
 
 SLICE_RE = re.compile(r"\.(\d+)\.dar$")
@@ -20,22 +21,31 @@ async def fetch(args) -> None:
     slices = mapping["slices"]
 
     requested = int(args.slice_number)
+    last_item = max(slices, key=lambda x: int(x["slice_number"]))
     if requested == 0:
-        item = max(slices, key=lambda x: int(x["slice_number"]))
+        item = last_item
     else:
         matches = [x for x in slices if int(x["slice_number"]) == requested]
         if not matches:
             raise RuntimeError(f"Slice {requested} non presente nel manifest")
         item = matches[0]
 
-    # DAR ha chiuso la slice precedente prima di chiamare -E per la successiva.
-    if requested > 0:
-        for p in work.glob("archive.*.dar"):
-            m = SLICE_RE.search(p.name)
-            if m and int(m.group(1)) < requested:
-                p.unlink(missing_ok=True)
-
     target = work / item["name"]
+    last_target = work / last_item["name"]
+
+    # DAR direct-access first needs the final slice for its internal catalogue,
+    # then asks data slices on demand. Keep the final slice plus the currently
+    # requested slice and remove the others. This stays bounded to at most two
+    # DAR slices while avoiding a second download of the catalogue/last slice.
+    keep = {target.resolve(), last_target.resolve()}
+    for p in work.glob("archive.*.dar"):
+        try:
+            resolved = p.resolve()
+        except OSError:
+            resolved = p
+        if resolved not in keep:
+            p.unlink(missing_ok=True)
+
     if target.exists():
         if target.stat().st_size == int(item["size"]) and sha512_file(target) == item["sha512"]:
             return
@@ -48,6 +58,9 @@ async def fetch(args) -> None:
         if not msg:
             raise RuntimeError(f"Messaggio Telegram mancante: {item['message_id']}")
 
+        workers = parse_download_workers(
+            cfg.get("TELEGRAM_DOWNLOAD_WORKERS", "4")
+        )
         last_pct = -10
 
         def progress(done: int, total: int) -> None:
@@ -56,9 +69,17 @@ async def fetch(args) -> None:
                 pct = done * 100 // total
                 if pct >= 100 or pct >= last_pct + 10:
                     last_pct = pct
-                    print(f"Download {target.name}: {pct:3d}%", flush=True)
+                    suffix = f" (parallel={workers})" if workers > 1 else ""
+                    print(f"Download {target.name}: {pct:3d}%{suffix}", flush=True)
 
-        result = await client.download_media(msg, file=str(target), progress_callback=progress)
+        result = await download_document_parallel(
+            client,
+            msg,
+            target,
+            size=int(item["size"]),
+            workers=workers,
+            progress_callback=progress,
+        )
         if not result:
             raise RuntimeError(f"Download fallito: {target.name}")
     finally:
