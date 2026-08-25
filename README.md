@@ -831,6 +831,20 @@ Before the new `COMPLETE` manifest exists, the previous valid generation remains
 
 ---
 
+# 🚦 Transfer speed and Telegram limits
+
+Telegram is not a dedicated high-throughput backup transport. Even with a fast Internet connection, large uploads and downloads may run well below the available line rate, and throughput can vary substantially during the same backup or restore.
+
+Telegram's MTProto file API can apply server-side rate limits to very large transfers. The official file API documentation describes `FLOOD_PREMIUM_WAIT_X` upload/download throttling after large transfer volumes; routing, the selected Telegram data center, account/server limits and normal Internet conditions can also become bottlenecks.
+
+`TELEGRAM_UPLOAD_WORKERS` and `TELEGRAM_DOWNLOAD_WORKERS` use parallel requests/connections to improve throughput where possible, but they cannot guarantee full utilization of the local Internet connection or bypass Telegram-side limits. Increasing worker counts beyond the useful point may provide no additional speed.
+
+Temporary slowdowns — including sharp changes from one slice to the next — do not by themselves indicate archive corruption. Each slice is recorded with its expected size and SHA-512, and downloaded slices are verified before DAR consumes them. If a backup is still progressing without errors, a temporary speed drop is normally a reason to let it continue rather than interrupt it.
+
+This project is therefore intended to use Telegram as the **off-site "1" in a 3-2-1 backup strategy**, not as the fastest recovery tier. Keep normal local/on-site copies for routine restores; use the encrypted Telegram copy as an additional geographically separate recovery option.
+
+---
+
 # 💡 Backup strategy
 
 For important data, use this project as part of a broader **3-2-1 strategy**:
