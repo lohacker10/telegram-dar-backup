@@ -789,6 +789,14 @@ Run `telegram_login.py` again.
 
 Check `DAR_PASSPHRASE_FILE`. An incorrect passphrase prevents DAR from reading encrypted catalogues/archives.
 
+## Telegram transfers become very slow
+
+Upload and download throughput can vary substantially during long-running transfers. Slices may transfer quickly for a while, slow down significantly, and later recover without any local configuration change.
+
+Possible bottlenecks include the Internet connection and routing, the selected Telegram data center, and Telegram account/server-side limits. The project cannot guarantee stable throughput, so a short speed sample is not a reliable estimate of the total backup or restore duration.
+
+A slowdown by itself does **not** indicate archive corruption. Slice size and SHA-512 metadata are recorded by the backup, and downloaded slices are checked against that metadata before DAR consumes them. If the process is still making progress and no error is reported, it is generally better to let it continue rather than interrupt a valid backup or restore only because the transfer rate has changed.
+
 ## Internet or power failure during backup
 
 Before the new `COMPLETE` manifest exists, the previous valid generation remains intact. Interrupted attempts can leave orphan encrypted Telegram messages, but they are not considered valid backups without a COMPLETE manifest.
